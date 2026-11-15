@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lizard - Server Monitor</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🦎</text></svg>">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Navbar -->
+    <header class="navbar">
+      <div class="nav-brand">
+        <span class="logo">🦎</span>
+        <div>
+          <h1 class="nav-title">Lizard Monitor</h1>
+          <div class="header-badges">
+            <span class="host-pill" id="hostPill">Connecting...</span>
+            <span class="status-indicator-pill" id="sysHealthPill">System: ...</span>
+            <span class="status-indicator-pill" id="dockHealthPill">Docker: ...</span>
+            <span class="status-indicator-pill" id="borgHealthPill">Borgmatic: ...</span>
+          </div>
+        </div>
+      </div>
+      <div class="nav-actions">
+        <div class="live-indicator">
+          <span class="pulse-dot" id="liveDot"></span>
+          <span id="lastUpdated">Connecting...</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Global Alert Banner -->
+    <div id="globalAlert" class="alert-box alert-danger" style="display: none;"></div>
+
+    <!-- Quick Stat Cards -->
+    <section class="stats-grid">
+      <div class="card stat-card" id="cpuCard">
+        <div class="stat-header">
+          <span class="stat-label">CPU Usage</span>
+          <span class="stat-badge" id="cpuBadge">0%</span>
+        </div>
+        <div class="stat-value" id="cpuValue">0.0<span class="unit">%</span></div>
+        <div class="progress-bar-bg">
+          <div class="progress-bar cpu-bar" id="cpuProgressBar" style="width: 0%"></div>
+        </div>
+        <div class="stat-sub" id="cpuSub">Cores active</div>
+      </div>
+
+      <div class="card stat-card" id="memCard">
+        <div class="stat-header">
+          <span class="stat-label">Memory Usage</span>
+          <span class="stat-badge" id="memBadge">0%</span>
+        </div>
+        <div class="stat-value" id="memValue">0.0<span class="unit">%</span></div>
+        <div class="progress-bar-bg">
+          <div class="progress-bar mem-bar" id="memProgressBar" style="width: 0%"></div>
+        </div>
+        <div class="stat-sub" id="memSub">0 B / 0 B</div>
+      </div>
+
+      <div class="card stat-card" id="diskCard">
+        <div class="stat-header">
+          <span class="stat-label">Disk Usage</span>
+          <span class="stat-badge" id="diskBadge">0%</span>
+        </div>
+        <div class="stat-value" id="diskValue">0.0<span class="unit">%</span></div>
+        <div class="progress-bar-bg">
+          <div class="progress-bar disk-bar" id="diskProgressBar" style="width: 0%"></div>
+        </div>
+        <div class="stat-sub" id="diskSub">0 B / 0 B</div>
+      </div>
+
+      <div class="card stat-card" id="dockerCard">
+        <div class="stat-header">
+          <span class="stat-label">Docker Containers</span>
+          <span class="stat-badge count-badge" id="dockerCountBadge">0</span>
+        </div>
+        <div class="stat-value" id="dockerRunningCount">0<span class="unit"> running</span></div>
+        <div class="stat-sub" id="dockerTotalSub">Total: 0 containers</div>
+      </div>
+
+      <div class="card stat-card" id="borgCard">
+        <div class="stat-header">
+          <span class="stat-label">Borgmatic Backups</span>
+          <span class="stat-badge count-badge" id="borgCountBadge">0</span>
+        </div>
+        <div class="stat-value" id="borgArchiveCount">0<span class="unit"> snapshots</span></div>
+        <div class="stat-sub" id="borgLatestSub">No backups recorded</div>
+      </div>
+    </section>
+
+    <!-- Historical Graphs -->
+    <section class="section-box">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">Historical Resource Usage</h2>
+          <p class="section-desc">Historical timeline of CPU, memory, and disk usage</p>
+        </div>
+        <div class="chart-legend">
+          <span class="legend-item"><span class="legend-dot cpu-dot"></span> CPU %</span>
+          <span class="legend-item"><span class="legend-dot mem-dot"></span> Memory %</span>
+          <span class="legend-item"><span class="legend-dot disk-dot"></span> Disk %</span>
+        </div>
+      </div>
+
+      <div id="chartAlert" class="alert-box alert-warning" style="display: none;"></div>
+
+      <div class="charts-row">
+        <!-- CPU Chart -->
+        <div class="card chart-card">
+          <div class="chart-card-header">
+            <h3>CPU History (%)</h3>
+            <span class="current-metric-pill cpu-pill" id="chartCpuCurrent">--%</span>
+          </div>
+          <div class="chart-wrapper">
+            <svg id="cpuChart" class="svg-chart" viewBox="0 0 600 200" preserveAspectRatio="none"></svg>
+            <div id="cpuTooltip" class="chart-tooltip"></div>
+          </div>
+        </div>
+
+        <!-- Memory Chart -->
+        <div class="card chart-card">
+          <div class="chart-card-header">
+            <h3>Memory History (%)</h3>
+            <span class="current-metric-pill mem-pill" id="chartMemCurrent">--%</span>
+          </div>
+          <div class="chart-wrapper">
+            <svg id="memChart" class="svg-chart" viewBox="0 0 600 200" preserveAspectRatio="none"></svg>
+            <div id="memTooltip" class="chart-tooltip"></div>
+          </div>
+        </div>
+
+        <!-- Disk Chart -->
+        <div class="card chart-card">
+          <div class="chart-card-header">
+            <h3>Disk History (%)</h3>
+            <span class="current-metric-pill disk-pill" id="chartDiskCurrent">--%</span>
+          </div>
+          <div class="chart-wrapper">
+            <svg id="diskChart" class="svg-chart" viewBox="0 0 600 200" preserveAspectRatio="none"></svg>
+            <div id="diskTooltip" class="chart-tooltip"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Top Directories Table -->
+    <section class="section-box">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">Disk Storage & Top Directories</h2>
+          <p class="section-desc" id="diskSummaryDesc">Overview of disk space distribution and largest subdirectories</p>
+        </div>
+      </div>
+
+      <div id="diskAlert" class="alert-box alert-warning" style="display: none;"></div>
+
+      <div class="card table-card">
+        <div class="table-responsive">
+          <table class="data-table" id="topDirsTable">
+            <thead>
+              <tr>
+                <th>Directory Path</th>
+                <th>Size</th>
+                <th style="width: 35%;">Share of Total Disk</th>
+                <th>Estimated Files</th>
+              </tr>
+            </thead>
+            <tbody id="topDirsBody">
+              <tr><td colspan="4" class="empty-state">Loading disk breakdown...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Docker Containers Table -->
+    <section class="section-box">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">Docker Containers</h2>
+          <p class="section-desc">Active containers, runtime duration, and live resource usage</p>
+        </div>
+        <div class="search-box">
+          <input type="text" id="containerSearch" placeholder="Filter containers (e.g. syncthing, borgmatic)...">
+        </div>
+      </div>
+
+      <div id="dockerAlert" class="alert-box alert-danger" style="display: none;"></div>
+
+      <div class="card table-card">
+        <div class="table-responsive">
+          <table class="data-table" id="containersTable">
+            <thead>
+              <tr>
+                <th>Container</th>
+                <th>Image</th>
+                <th>State</th>
+                <th>Uptime / Duration</th>
+                <th>CPU Usage</th>
+                <th>Memory Usage</th>
+              </tr>
+            </thead>
+            <tbody id="containersBody">
+              <tr><td colspan="6" class="empty-state">Loading containers...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Borgmatic Backups Table -->
+    <section class="section-box">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">Borgmatic Backups</h2>
+          <p class="section-desc" id="borgSubtitle">Snapshots, archive sizes, file counts, and deduplication</p>
+        </div>
+      </div>
+
+      <div id="borgAlert" class="alert-box alert-info" style="display: none;"></div>
+
+      <div class="card table-card">
+        <div class="table-responsive">
+          <table class="data-table" id="borgTable">
+            <thead>
+              <tr>
+                <th>Archive Name</th>
+                <th>Repository</th>
+                <th>Timestamp</th>
+                <th>Duration</th>
+                <th>Original Size</th>
+                <th>Compressed</th>
+                <th>Deduplicated Size</th>
+                <th>Files</th>
+              </tr>
+            </thead>
+            <tbody id="borgBody">
+              <tr><td colspan="8" class="empty-state">Loading Borgmatic stats...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <span>🦎 Lizard Server Monitor</span>
+      <span class="footer-separator">•</span>
+      <span id="footerUptime">Server Uptime: --</span>
+      <span class="footer-separator">•</span>
+      <span id="footerTime">--</span>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
