@@ -10,8 +10,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 )
+
+var logMountsOnce sync.Once
 
 type discoveredMount struct {
 	DisplayPath string
@@ -61,19 +64,28 @@ var ignoredFSTypes = map[string]bool{
 
 // discoverMounts reads the host mount table to find unique physical/network disks.
 func discoverMounts(hostRoot string) []discoveredMount {
-	mountsPath := "/proc/mounts"
+	var candidates []string
 	if hostRoot != "" && hostRoot != "/" {
-		hostProcMounts := filepath.Join(hostRoot, "proc", "mounts")
-		if _, err := os.Stat(hostProcMounts); err == nil {
-			mountsPath = hostProcMounts
-		} else if _, err := os.Stat("/proc/1/mounts"); err == nil {
-			// With pid: "host", PID 1 is the host's init/systemd, so /proc/1/mounts has the host mount table
-			mountsPath = "/proc/1/mounts"
+		candidates = append(candidates, filepath.Join(hostRoot, "proc", "mounts"), "/proc/1/mounts")
+	}
+	candidates = append(candidates, "/proc/mounts")
+
+	var f *os.File
+	var mountsPath string
+	for _, p := range candidates {
+		file, err := os.Open(p)
+		if err == nil {
+			f = file
+			mountsPath = p
+			break
+		}
+		if p == "/proc/1/mounts" && !os.IsNotExist(err) {
+			logMountsOnce.Do(func() {
+				log.Printf("Warning: unable to read %s (%v); falling back to /proc/mounts. Ensure pid: \"host\" is set and CAP_SYS_PTRACE is not dropped.", p, err)
+			})
 		}
 	}
-
-	f, err := os.Open(mountsPath)
-	if err != nil {
+	if f == nil {
 		return nil
 	}
 	defer f.Close()
@@ -160,6 +172,15 @@ func discoverMounts(hostRoot string) []discoveredMount {
 		}
 		return result[i].DisplayPath < result[j].DisplayPath
 	})
+
+	logMountsOnce.Do(func() {
+		paths := make([]string, len(result))
+		for i, r := range result {
+			paths[i] = r.DisplayPath + " (" + r.Device + ")"
+		}
+		log.Printf("Discovered disks from %s: %v", mountsPath, paths)
+	})
+
 	return result
 }
 
