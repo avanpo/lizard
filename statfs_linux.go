@@ -64,9 +64,13 @@ var ignoredFSTypes = map[string]bool{
 
 // discoverMounts reads the host mount table to find unique physical/network disks.
 func discoverMounts(hostRoot string) []discoveredMount {
+	// Note: /proc/mounts (and /host/proc/mounts) is a symlink to self/mounts, which
+	// always resolves to the container's own mount namespace. PID 1's mounts file
+	// (/proc/1/mounts with pid: "host", or /host/proc/1/mounts) gives the host's mounts.
 	var candidates []string
+	candidates = append(candidates, "/proc/1/mounts")
 	if hostRoot != "" && hostRoot != "/" {
-		candidates = append(candidates, filepath.Join(hostRoot, "proc", "mounts"), "/proc/1/mounts")
+		candidates = append(candidates, filepath.Join(hostRoot, "proc", "1", "mounts"))
 	}
 	candidates = append(candidates, "/proc/mounts")
 
