@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -82,6 +83,10 @@ func discoverMounts(hostRoot string) []discoveredMount {
 		devID uint64
 	}
 	byDev := make(map[uint64]candidate)
+	rootDevID, hasRootDev := getDevID(hostRoot)
+	if hostRoot == "" {
+		rootDevID, hasRootDev = getDevID("/")
+	}
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -137,6 +142,8 @@ func discoverMounts(hostRoot string) []discoveredMount {
 		// Deduplicate bind mounts of the same device, preferring shortest mount path (e.g. "/")
 		if existing, exists := byDev[devID]; !exists || len(mnt) < len(existing.mount.DisplayPath) {
 			byDev[devID] = candidate{mount: m, devID: devID}
+		} else if hasRootDev && devID == rootDevID && mnt != "/" && existing.mount.Device != dev {
+			log.Printf("Note: host mount %s (%s) is not visible inside %s (mount propagation is private). Use '- /:/host:ro,rslave' or mount %s directly.", mnt, dev, hostRoot, mnt)
 		}
 	}
 

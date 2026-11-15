@@ -330,7 +330,7 @@
               <span class="current-metric-pill disk-pill" id="chartDiskCurrent-${idx}">--%</span>
             </div>
             <div class="chart-wrapper">
-              <svg id="diskChart-${idx}" class="svg-chart" viewBox="0 0 600 200" preserveAspectRatio="none"></svg>
+              <svg id="diskChart-${idx}" class="svg-chart"></svg>
               <div id="diskTooltip-${idx}" class="chart-tooltip"></div>
             </div>
           </div>
@@ -368,12 +368,15 @@
   }
 
   function drawSvgChart(svg, tooltip, data, valFn, strokeColor, unit, gradKey) {
-    const width = 600;
-    const height = 200;
-    const padTop = 20;
-    const padBottom = 25;
-    const padLeft = 40;
-    const padRight = 15;
+    const rect = svg.getBoundingClientRect();
+    const width = Math.max(300, Math.round(rect.width) || 600);
+    const height = Math.max(140, Math.round(rect.height) || 180);
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+
+    const padTop = 16;
+    const padBottom = 20;
+    const padLeft = 42;
+    const padRight = 14;
 
     const chartW = width - padLeft - padRight;
     const chartH = height - padTop - padBottom;
