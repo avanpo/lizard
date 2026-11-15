@@ -33,6 +33,7 @@ type Config struct {
 	BorgmaticCmd      string
 	BorgmaticFile     string
 	BorgmaticInterval time.Duration
+	DataDir           string
 	Demo              bool
 }
 
@@ -118,18 +119,16 @@ func loadConfigFromEnv() *Config {
 		BorgmaticCmd:      envString("LIZARD_BORGMATIC_CMD", ""),
 		BorgmaticFile:     envString("LIZARD_BORGMATIC_FILE", ""),
 		BorgmaticInterval: envDuration("LIZARD_BORGMATIC_INTERVAL", 5*time.Minute),
+		DataDir:           envString("LIZARD_DATA_DIR", ""),
 		Demo:              envBool("LIZARD_DEMO", false),
 	}
 
-	diskDirsStr := envString("LIZARD_DISK_DIRS", "/")
+	diskDirsStr := envString("LIZARD_DISK_DIRS", "")
 	for _, d := range strings.Split(diskDirsStr, ",") {
 		d = strings.TrimSpace(d)
 		if d != "" {
 			cfg.DiskDirs = append(cfg.DiskDirs, d)
 		}
-	}
-	if len(cfg.DiskDirs) == 0 {
-		cfg.DiskDirs = []string{"/"}
 	}
 
 	return cfg
@@ -141,12 +140,19 @@ func main() {
 	log.Printf("Starting Lizard Server Monitor on %s:%d ...", cfg.Host, cfg.Port)
 	log.Printf("  Docker Socket:     %s", cfg.DockerSocket)
 	log.Printf("  Host Root:         %s", cfg.HostRoot)
-	log.Printf("  Disk Dirs:         %v", cfg.DiskDirs)
+	if len(cfg.DiskDirs) > 0 {
+		log.Printf("  Disk Dirs:         %v", cfg.DiskDirs)
+	} else {
+		log.Printf("  Disk Dirs:         auto-discover from /proc/mounts")
+	}
 	if cfg.BorgmaticFile != "" {
 		log.Printf("  Borgmatic File:    %s", cfg.BorgmaticFile)
 	}
 	if cfg.BorgmaticCmd != "" {
 		log.Printf("  Borgmatic Command: %s", cfg.BorgmaticCmd)
+	}
+	if cfg.DataDir != "" {
+		log.Printf("  Data Dir:          %s", cfg.DataDir)
 	}
 	if cfg.Demo {
 		log.Printf("  Demo Mode:         ENABLED")
@@ -157,7 +163,7 @@ func main() {
 		sysColl:  NewSystemCollector(cfg.HostRoot, cfg.DiskDirs, cfg.TopDirLimit, cfg.DiskScanInterval, cfg.Demo),
 		dockColl: NewDockerCollector(cfg.DockerSocket, cfg.Demo),
 		borgColl: NewBorgmaticCollector(cfg.BorgmaticCmd, cfg.BorgmaticFile, cfg.BorgmaticInterval, cfg.Demo),
-		history:  NewHistoryBuffer(cfg.HistoryPoints),
+		history:  NewHistoryBuffer(cfg.HistoryPoints, cfg.DataDir),
 	}
 
 	// Initial poll
@@ -205,6 +211,9 @@ func main() {
 	log.Printf("Dashboard accessible at http://%s", addr)
 	<-stop
 	log.Println("Shutting down Lizard...")
+	if err := srv.history.Save(); err != nil {
+		log.Printf("Warning: failed saving history on shutdown: %v", err)
+	}
 }
 
 func (s *Server) tick() {
@@ -221,13 +230,27 @@ func (s *Server) tick() {
 	}
 	s.mu.Unlock()
 
+	diskMap := make(map[string]float64, len(sys.Disks))
+	var primaryDiskPct float64
+	var primaryDiskUsed uint64
+	if len(sys.Disks) > 0 {
+		primaryDiskPct = sys.Disks[0].UsedPercent
+		primaryDiskUsed = sys.Disks[0].Used
+	}
+	for _, d := range sys.Disks {
+		if d.Error == "" {
+			diskMap[d.Path] = d.UsedPercent
+		}
+	}
+
 	s.history.Add(HistoryPoint{
 		Timestamp:     sys.Timestamp,
 		CPUPercent:    sys.CPUPercent,
 		MemPercent:    sys.Memory.UsedPercent,
-		DiskPercent:   sys.Disk.UsedPercent,
+		DiskPercent:   primaryDiskPct,
+		Disks:         diskMap,
 		MemUsedBytes:  sys.Memory.Used,
-		DiskUsedBytes: sys.Disk.Used,
+		DiskUsedBytes: primaryDiskUsed,
 	})
 }
 

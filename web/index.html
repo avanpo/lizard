@@ -107,7 +107,7 @@
 
       <div id="chartAlert" class="alert-box alert-warning" style="display: none;"></div>
 
-      <div class="charts-row">
+      <div class="charts-row" id="sysChartsRow">
         <!-- CPU Chart -->
         <div class="card chart-card">
           <div class="chart-card-header">
@@ -131,47 +131,24 @@
             <div id="memTooltip" class="chart-tooltip"></div>
           </div>
         </div>
-
-        <!-- Disk Chart -->
-        <div class="card chart-card">
-          <div class="chart-card-header">
-            <h3>Disk History (%)</h3>
-            <span class="current-metric-pill disk-pill" id="chartDiskCurrent">--%</span>
-          </div>
-          <div class="chart-wrapper">
-            <svg id="diskChart" class="svg-chart" viewBox="0 0 600 200" preserveAspectRatio="none"></svg>
-            <div id="diskTooltip" class="chart-tooltip"></div>
-          </div>
-        </div>
       </div>
+
+      <!-- Per-Disk Historical Charts -->
+      <div class="charts-row disk-charts-row" id="diskChartsRow"></div>
     </section>
 
-    <!-- Top Directories Table -->
+    <!-- Per-Disk Notable Directories Tables -->
     <section class="section-box">
       <div class="section-header">
         <div>
-          <h2 class="section-title">Disk Storage & Top Directories</h2>
-          <p class="section-desc" id="diskSummaryDesc">Overview of disk space distribution and largest subdirectories</p>
+          <h2 class="section-title">Disk Storage & Notable Directories</h2>
+          <p class="section-desc" id="diskSummaryDesc">Per-disk usage and most notable directories (automatically rolled up or drilled down)</p>
         </div>
       </div>
 
-      <div id="diskAlert" class="alert-box alert-warning" style="display: none;"></div>
-
-      <div class="card table-card">
-        <div class="table-responsive">
-          <table class="data-table" id="topDirsTable">
-            <thead>
-              <tr>
-                <th>Directory Path</th>
-                <th>Size</th>
-                <th style="width: 35%;">Share of Total Disk</th>
-                <th>Estimated Files</th>
-              </tr>
-            </thead>
-            <tbody id="topDirsBody">
-              <tr><td colspan="4" class="empty-state">Loading disk breakdown...</td></tr>
-            </tbody>
-          </table>
+      <div id="diskTablesContainer" class="disk-tables-container">
+        <div class="card table-card">
+          <div class="empty-state">Loading disk breakdown...</div>
         </div>
       </div>
     </section>

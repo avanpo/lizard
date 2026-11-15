@@ -31,6 +31,7 @@ All configuration is provided via environment variables:
 | `LIZARD_BORGMATIC_CMD` | `""` | Command to execute to obtain Borgmatic JSON output |
 | `LIZARD_BORGMATIC_FILE` | `""` | Path to a pre-generated JSON file containing Borgmatic info |
 | `LIZARD_BORGMATIC_INTERVAL` | `5m` | Interval between Borgmatic data refreshes |
+| `LIZARD_DATA_DIR` | `""` | Directory to persist historical resource usage across restarts (`history.json`) |
 | `LIZARD_DEMO` | `false` | Enable demo mode with realistic mock data for local testing |
 
 ---

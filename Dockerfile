@@ -24,8 +24,7 @@ COPY --from=builder /build/lizard /usr/local/bin/lizard
 ENV LIZARD_PORT=8080 \
     LIZARD_HOST=0.0.0.0 \
     LIZARD_DOCKER_SOCKET=/var/run/docker.sock \
-    LIZARD_HOST_ROOT=/host \
-    LIZARD_DISK_DIRS=/host
+    LIZARD_HOST_ROOT=/host
 
 # Healthcheck
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

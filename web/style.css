@@ -380,6 +380,40 @@ body {
   gap: 16px;
 }
 
+.disk-charts-row {
+  margin-top: 16px;
+}
+
+.disk-tables-container {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.disk-table-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-color);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.disk-table-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.disk-table-stats {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 .chart-card {
   padding: 16px 18px;
 }

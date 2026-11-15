@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"io/fs"
 	"math"
@@ -37,9 +36,11 @@ type DirUsage struct {
 	FileCount int64   `json:"file_count"`
 }
 
-// DiskStats contains disk space details and top subdirectories.
+// DiskStats contains disk space details and notable subdirectories for one disk.
 type DiskStats struct {
 	Path            string     `json:"path"`
+	Device          string     `json:"device,omitempty"`
+	FSType          string     `json:"fstype,omitempty"`
 	Total           uint64     `json:"total"`
 	Used            uint64     `json:"used"`
 	Free            uint64     `json:"free"`
@@ -53,33 +54,38 @@ type DiskStats struct {
 	PermissionNotes []string   `json:"permission_notes,omitempty"`
 }
 
-// SystemMetrics encapsulates CPU, Memory, and Disk stats with error states.
+// SystemMetrics encapsulates CPU, Memory, and per-Disk stats with error states.
 type SystemMetrics struct {
 	Timestamp  time.Time   `json:"timestamp"`
 	CPUPercent float64     `json:"cpu_percent"`
 	CPUError   string      `json:"cpu_error,omitempty"`
 	Memory     MemoryStats `json:"memory"`
-	Disk       DiskStats   `json:"disk"`
+	Disks      []DiskStats `json:"disks"`
 	Uptime     string      `json:"uptime"`
 	HostName   string      `json:"hostname"`
 }
 
-// SystemCollector collects host /proc and disk metrics.
+type cachedDiskDirs struct {
+	dirs      []DirUsage
+	warning   string
+	permNotes []string
+}
+
+// SystemCollector collects host /proc and per-disk metrics.
 type SystemCollector struct {
 	hostRoot         string
 	diskDirs         []string
 	topDirLimit      int
 	diskScanInterval time.Duration
 
-	mu              sync.RWMutex
-	prevCPUTotal    uint64
-	prevCPUIdle     uint64
-	hasPrevCPU      bool
-	cachedTopDirs   []DirUsage
-	cachedWarnings  string
-	cachedPermNotes []string
-	lastDiskScan    time.Time
-	demoMode        bool
+	mu           sync.RWMutex
+	prevCPUTotal uint64
+	prevCPUIdle  uint64
+	hasPrevCPU   bool
+	cachedDisks  map[string]cachedDiskDirs
+	lastDiskScan time.Time
+	scanning     bool
+	demoMode     bool
 }
 
 // NewSystemCollector initializes a new SystemCollector.
@@ -89,6 +95,7 @@ func NewSystemCollector(hostRoot string, diskDirs []string, topDirLimit int, dis
 		diskDirs:         diskDirs,
 		topDirLimit:      topDirLimit,
 		diskScanInterval: diskScanInterval,
+		cachedDisks:      make(map[string]cachedDiskDirs),
 		demoMode:         demo,
 	}
 }
@@ -104,7 +111,7 @@ func (c *SystemCollector) Collect() SystemMetrics {
 
 	cpuPercent, cpuErr := c.readCPUUsage()
 	memStats := c.readMemoryUsage()
-	diskStats := c.readDiskUsage()
+	disks := c.readDisksUsage()
 	uptime := c.readUptime()
 
 	cpuErrStr := ""
@@ -117,7 +124,7 @@ func (c *SystemCollector) Collect() SystemMetrics {
 		CPUPercent: math.Round(cpuPercent*10) / 10,
 		CPUError:   cpuErrStr,
 		Memory:     memStats,
-		Disk:       diskStats,
+		Disks:      disks,
 		Uptime:     uptime,
 		HostName:   hostname,
 	}
@@ -290,199 +297,379 @@ func (c *SystemCollector) readMemoryUsage() MemoryStats {
 	}
 }
 
-// readDiskUsage queries filesystem stat and triggers directory scans.
-func (c *SystemCollector) readDiskUsage() DiskStats {
-	targetDir := "/"
+func (c *SystemCollector) resolveTargets() []discoveredMount {
 	if len(c.diskDirs) > 0 {
-		targetDir = c.diskDirs[0]
-	}
-
-	checkDir := targetDir
-	if c.hostRoot != "" && c.hostRoot != "/" {
-		checkDir = c.hostRoot
-	}
-
-	total, free, _, err := getDiskUsageStat(checkDir)
-	var used uint64
-	var usedPercent float64
-	var diskErr string
-
-	if err != nil {
-		if os.IsPermission(err) {
-			diskErr = fmt.Sprintf("permission denied reading filesystem stats for %s", checkDir)
-		} else if os.IsNotExist(err) {
-			diskErr = fmt.Sprintf("target directory %s does not exist", checkDir)
-		} else {
-			diskErr = fmt.Sprintf("failed reading disk stat for %s: %v", checkDir, err)
+		var targets []discoveredMount
+		for _, d := range c.diskDirs {
+			display := d
+			if c.hostRoot != "" && c.hostRoot != "/" && strings.HasPrefix(d, c.hostRoot) {
+				stripped := strings.TrimPrefix(d, c.hostRoot)
+				if stripped == "" {
+					stripped = "/"
+				}
+				display = stripped
+			}
+			targets = append(targets, discoveredMount{
+				DisplayPath: display,
+				ScanPath:    d,
+			})
 		}
-	} else if total > 0 {
-		if total >= free {
-			used = total - free
-		}
-		usedPercent = (float64(used) / float64(total)) * 100.0
+		return targets
 	}
 
-	topDirs, topWarning, permNotes := c.getOrUpdateTopDirs(checkDir, total)
-
-	return DiskStats{
-		Path:            targetDir,
-		Total:           total,
-		Used:            used,
-		Free:            free,
-		UsedPercent:     math.Round(usedPercent*10) / 10,
-		HumanTotal:      FormatBytes(total),
-		HumanUsed:       FormatBytes(used),
-		HumanFree:       FormatBytes(free),
-		TopDirs:         topDirs,
-		Error:           diskErr,
-		TopDirsWarning:  topWarning,
-		PermissionNotes: permNotes,
+	mounts := discoverMounts(c.hostRoot)
+	if len(mounts) > 0 {
+		return mounts
 	}
+
+	// Fallback if /proc/mounts unavailable
+	scan := "/"
+	if c.hostRoot != "" {
+		scan = c.hostRoot
+	}
+	return []discoveredMount{{DisplayPath: "/", ScanPath: scan}}
 }
 
-// getOrUpdateTopDirs returns cached top directories or triggers background refresh.
-func (c *SystemCollector) getOrUpdateTopDirs(rootDir string, totalDiskBytes uint64) ([]DirUsage, string, []string) {
-	c.mu.Lock()
-	now := time.Now()
-	if c.cachedTopDirs == nil || now.Sub(c.lastDiskScan) > c.diskScanInterval {
-		c.lastDiskScan = now
-		c.mu.Unlock()
+// readDisksUsage queries filesystem stats for all discovered/configured disks and refreshes directory trees.
+func (c *SystemCollector) readDisksUsage() []DiskStats {
+	targets := c.resolveTargets()
 
-		if c.cachedTopDirs == nil {
-			dirs, warning, permNotes := c.scanTopDirs(rootDir, totalDiskBytes)
-			c.mu.Lock()
-			c.cachedTopDirs = dirs
-			c.cachedWarnings = warning
-			c.cachedPermNotes = permNotes
-			c.mu.Unlock()
-			return dirs, warning, permNotes
+	type statResult struct {
+		mount discoveredMount
+		total uint64
+		used  uint64
+		free  uint64
+		pct   float64
+		err   string
+	}
+
+	stats := make([]statResult, len(targets))
+	for i, t := range targets {
+		total, free, _, err := getDiskUsageStat(t.ScanPath)
+		var used uint64
+		var usedPercent float64
+		var diskErr string
+
+		if err != nil {
+			if os.IsPermission(err) {
+				diskErr = fmt.Sprintf("permission denied reading filesystem stats for %s", t.ScanPath)
+			} else if os.IsNotExist(err) {
+				diskErr = fmt.Sprintf("target directory %s does not exist", t.ScanPath)
+			} else {
+				diskErr = fmt.Sprintf("failed reading disk stat for %s: %v", t.ScanPath, err)
+			}
+		} else if total > 0 {
+			if total >= free {
+				used = total - free
+			}
+			usedPercent = (float64(used) / float64(total)) * 100.0
 		}
 
-		go func() {
-			dirs, warning, permNotes := c.scanTopDirs(rootDir, totalDiskBytes)
+		stats[i] = statResult{
+			mount: t,
+			total: total,
+			used:  used,
+			free:  free,
+			pct:   math.Round(usedPercent*10) / 10,
+			err:   diskErr,
+		}
+	}
+
+	// Check if directory scan cache needs refresh
+	c.mu.Lock()
+	needScan := len(c.cachedDisks) == 0 || time.Since(c.lastDiskScan) > c.diskScanInterval
+	firstScan := len(c.cachedDisks) == 0
+	if needScan && !c.scanning {
+		c.scanning = true
+		c.lastDiskScan = time.Now()
+		c.mu.Unlock()
+
+		runScan := func() {
+			updated := make(map[string]cachedDiskDirs, len(stats))
+			for _, st := range stats {
+				if st.err != "" {
+					continue
+				}
+				dirs, warn, notes := c.scanInterestingDirs(st.mount, st.total)
+				updated[st.mount.DisplayPath] = cachedDiskDirs{
+					dirs:      dirs,
+					warning:   warn,
+					permNotes: notes,
+				}
+			}
 			c.mu.Lock()
-			c.cachedTopDirs = dirs
-			c.cachedWarnings = warning
-			c.cachedPermNotes = permNotes
+			c.cachedDisks = updated
+			c.lastDiskScan = time.Now()
+			c.scanning = false
 			c.mu.Unlock()
-		}()
+		}
+
+		if firstScan {
+			runScan()
+		} else {
+			go runScan()
+		}
 	} else {
 		c.mu.Unlock()
 	}
 
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.cachedTopDirs, c.cachedWarnings, c.cachedPermNotes
+
+	results := make([]DiskStats, len(stats))
+	for i, st := range stats {
+		cached := c.cachedDisks[st.mount.DisplayPath]
+		results[i] = DiskStats{
+			Path:            st.mount.DisplayPath,
+			Device:          st.mount.Device,
+			FSType:          st.mount.FSType,
+			Total:           st.total,
+			Used:            st.used,
+			Free:            st.free,
+			UsedPercent:     st.pct,
+			HumanTotal:      FormatBytes(st.total),
+			HumanUsed:       FormatBytes(st.used),
+			HumanFree:       FormatBytes(st.free),
+			TopDirs:         cached.dirs,
+			Error:           st.err,
+			TopDirsWarning:  cached.warning,
+			PermissionNotes: cached.permNotes,
+		}
+	}
+	return results
 }
 
-// scanTopDirs scans subdirectories of the target and computes their sizes.
-func (c *SystemCollector) scanTopDirs(rootDir string, totalDiskBytes uint64) ([]DirUsage, string, []string) {
-	entries, err := os.ReadDir(rootDir)
-	if err != nil {
-		if os.IsPermission(err) {
-			return nil, fmt.Sprintf("permission denied reading directory %s: container needs root privileges to inspect host files", rootDir), nil
-		}
-		return nil, fmt.Sprintf("unable to read directory %s: %v", rootDir, err), nil
-	}
+type dirNode struct {
+	displayPath string
+	totalSize   uint64
+	selfSize    uint64
+	fileCount   int64
+	depth       int
+	children    []*dirNode
+}
 
-	skipDirs := map[string]bool{
-		"proc": true, "sys": true, "dev": true, "run": true,
-	}
+// scanInterestingDirs walks a single disk (staying on its device ID) and selects the most notable directories.
+func (c *SystemCollector) scanInterestingDirs(m discoveredMount, totalDiskBytes uint64) ([]DirUsage, string, []string) {
+	rootDev, hasDev := getDevID(m.ScanPath)
 
-	var results []DirUsage
 	var permNotes []string
 	var skippedCount int
 
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if skipDirs[name] {
-			continue
-		}
-
-		subPath := filepath.Join(rootDir, name)
-		size, fileCount, permErr := calculateDirSize(subPath, 4)
-		if permErr != nil {
-			skippedCount++
-			if len(permNotes) < 5 {
-				permNotes = append(permNotes, fmt.Sprintf("permission denied on %s", name))
-			}
-		}
-
-		if size > 0 {
-			var pct float64
-			if totalDiskBytes > 0 {
-				pct = (float64(size) / float64(totalDiskBytes)) * 100.0
-			}
-			displayName := "/" + name
-			if rootDir != "/" && rootDir != c.hostRoot {
-				displayName = subPath
-			}
-			results = append(results, DirUsage{
-				Path:      displayName,
-				SizeBytes: size,
-				HumanSize: FormatBytes(size),
-				Percent:   math.Round(pct*10) / 10,
-				FileCount: fileCount,
-			})
-		}
+	skipRootDirs := map[string]bool{
+		"proc": true, "sys": true, "dev": true, "run": true,
 	}
 
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].SizeBytes > results[j].SizeBytes
-	})
+	const maxWalkDepth = 6
 
-	if len(results) > c.topDirLimit {
-		results = results[:c.topDirLimit]
+	var buildTree func(scanPath, displayPath string, depth int) *dirNode
+	buildTree = func(scanPath, displayPath string, depth int) *dirNode {
+		entries, err := os.ReadDir(scanPath)
+		if err != nil {
+			if os.IsPermission(err) {
+				skippedCount++
+				if len(permNotes) < 5 {
+					permNotes = append(permNotes, fmt.Sprintf("permission denied on %s", displayPath))
+				}
+			}
+			return nil
+		}
+
+		node := &dirNode{
+			displayPath: displayPath,
+			depth:       depth,
+		}
+
+		for _, entry := range entries {
+			name := entry.Name()
+			if depth == 0 && m.DisplayPath == "/" && skipRootDirs[name] {
+				continue
+			}
+			if entry.Type()&os.ModeSymlink != 0 {
+				continue
+			}
+
+			childScan := filepath.Join(scanPath, name)
+			childDisplay := filepath.Join(displayPath, name)
+			if displayPath == "/" {
+				childDisplay = "/" + name
+			}
+
+			if entry.IsDir() {
+				// Stay on the same filesystem so mounted sub-disks aren't double-counted
+				if hasDev {
+					if childDev, ok := getDevID(childScan); ok && childDev != rootDev {
+						continue
+					}
+				}
+
+				if depth+1 < maxWalkDepth {
+					childNode := buildTree(childScan, childDisplay, depth+1)
+					if childNode != nil && childNode.totalSize > 0 {
+						node.children = append(node.children, childNode)
+						node.totalSize += childNode.totalSize
+						node.fileCount += childNode.fileCount
+					}
+				} else {
+					sz, fc, permErr := sumSubtree(childScan, rootDev, hasDev)
+					if permErr {
+						skippedCount++
+					}
+					if sz > 0 {
+						node.children = append(node.children, &dirNode{
+							displayPath: childDisplay,
+							totalSize:   sz,
+							selfSize:    sz,
+							fileCount:   fc,
+							depth:       depth + 1,
+						})
+						node.totalSize += sz
+						node.fileCount += fc
+					}
+				}
+			} else {
+				info, err := entry.Info()
+				if err == nil {
+					sz := uint64(info.Size())
+					node.selfSize += sz
+					node.totalSize += sz
+					node.fileCount++
+				}
+			}
+		}
+
+		return node
+	}
+
+	rootNode := buildTree(m.ScanPath, m.DisplayPath, 0)
+	if rootNode == nil {
+		return nil, fmt.Sprintf("unable to read directory %s", m.ScanPath), permNotes
+	}
+
+	selected := selectInterestingNodes(rootNode, c.topDirLimit)
+
+	results := make([]DirUsage, 0, len(selected))
+	for _, n := range selected {
+		var pct float64
+		if totalDiskBytes > 0 {
+			pct = (float64(n.totalSize) / float64(totalDiskBytes)) * 100.0
+		}
+		results = append(results, DirUsage{
+			Path:      n.displayPath,
+			SizeBytes: n.totalSize,
+			HumanSize: FormatBytes(n.totalSize),
+			Percent:   math.Round(pct*10) / 10,
+			FileCount: n.fileCount,
+		})
 	}
 
 	var warning string
 	if skippedCount > 0 {
 		warning = fmt.Sprintf("%d restricted directories were partially or fully skipped due to permissions", skippedCount)
 	}
-
 	return results, warning, permNotes
 }
 
-// calculateDirSize traverses a directory up to maxDepth and sums file sizes.
-func calculateDirSize(dir string, maxDepth int) (uint64, int64, error) {
+// sumSubtree sums all regular files beneath dir while staying on rootDev.
+func sumSubtree(dir string, rootDev uint64, hasDev bool) (uint64, int64, bool) {
 	var totalSize uint64
 	var fileCount int64
 	var hadPermErr bool
 
-	baseDepth := strings.Count(filepath.Clean(dir), string(os.PathSeparator))
-
 	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			if errors.Is(err, fs.ErrPermission) || os.IsPermission(err) {
+			if os.IsPermission(err) {
 				hadPermErr = true
 			}
 			return nil
 		}
-		currentDepth := strings.Count(filepath.Clean(p), string(os.PathSeparator))
-		if currentDepth-baseDepth > maxDepth {
-			if d.IsDir() {
-				return fs.SkipDir
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if d.IsDir() {
+			if hasDev {
+				if dev, ok := getDevID(p); ok && dev != rootDev {
+					return fs.SkipDir
+				}
 			}
 			return nil
 		}
-
-		if !d.IsDir() {
-			info, err := d.Info()
-			if err == nil {
-				totalSize += uint64(info.Size())
-				fileCount++
-			}
+		info, err := d.Info()
+		if err == nil {
+			totalSize += uint64(info.Size())
+			fileCount++
 		}
 		return nil
 	})
 
-	if hadPermErr {
-		return totalSize, fileCount, errors.New("partial permission denied")
+	return totalSize, fileCount, hadPermErr
+}
+
+// selectInterestingNodes picks the most informative directories using top-down dominance drill-down:
+// - If a parent is mostly a wrapper around one huge child (e.g. /var -> /var/log -> /var/log/caddy),
+//   it drills down to the child.
+// - If a parent has many distributed children (e.g. /data/photos/2018..2026), it keeps the parent rolled up.
+func selectInterestingNodes(root *dirNode, limit int) []*dirNode {
+	if limit <= 0 {
+		limit = 10
 	}
-	return totalSize, fileCount, nil
+
+	candidates := make([]*dirNode, len(root.children))
+	copy(candidates, root.children)
+
+	var kept []*dirNode
+
+	for len(candidates) > 0 && len(kept) < limit {
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].totalSize > candidates[j].totalSize
+		})
+
+		top := candidates[0]
+		candidates = candidates[1:]
+
+		if shouldDrillDown(top) {
+			candidates = append(candidates, top.children...)
+			continue
+		}
+
+		kept = append(kept, top)
+	}
+
+	sort.Slice(kept, func(i, j int) bool {
+		return kept[i].totalSize > kept[j].totalSize
+	})
+	return kept
+}
+
+func shouldDrillDown(n *dirNode) bool {
+	if len(n.children) == 0 || n.totalSize == 0 {
+		return false
+	}
+
+	var maxChildSize uint64
+	var childrenSum uint64
+	for _, ch := range n.children {
+		childrenSum += ch.totalSize
+		if ch.totalSize > maxChildSize {
+			maxChildSize = ch.totalSize
+		}
+	}
+
+	maxShare := float64(maxChildSize) / float64(n.totalSize)
+	childrenShare := float64(childrenSum) / float64(n.totalSize)
+
+	// Single child dominates this directory (e.g. /var -> /var/log -> /var/log/app)
+	if maxShare >= 0.70 {
+		return true
+	}
+
+	// Shallow umbrella directory (/var, /home, /mnt, /srv, /opt, etc.) whose size is mostly in a few subdirs,
+	// rather than a collection of many small subdirs like photos/2018..2026.
+	isCollection := len(n.children) >= 8 && maxShare < 0.40
+	if n.depth <= 2 && childrenShare >= 0.85 && !isCollection {
+		return true
+	}
+
+	return false
 }
 
 // readUptime returns formatted system uptime.
@@ -530,19 +717,46 @@ func FormatBytes(b uint64) string {
 	return fmt.Sprintf("%.2f %s", float64(b)/float64(div), units[exp])
 }
 
-// collectDemo returns synthetic system data for demonstration or local dev.
+// collectDemo returns synthetic system data for multiple disks.
 func (c *SystemCollector) collectDemo(now time.Time, hostname string) SystemMetrics {
 	totalMem := uint64(32 * 1024 * 1024 * 1024)
 	usedMem := uint64(142 * 1024 * 1024 * 1024 / 10)
-	totalDisk := uint64(512 * 1024 * 1024 * 1024)
-	usedDisk := uint64(238 * 1024 * 1024 * 1024)
 
-	topDirs := []DirUsage{
-		{Path: "/var/lib/docker", SizeBytes: 85 * 1024 * 1024 * 1024, HumanSize: "85.00 GB", Percent: 16.6, FileCount: 64230},
-		{Path: "/home", SizeBytes: 72 * 1024 * 1024 * 1024, HumanSize: "72.00 GB", Percent: 14.1, FileCount: 142100},
-		{Path: "/mnt/backups", SizeBytes: 52 * 1024 * 1024 * 1024, HumanSize: "52.00 GB", Percent: 10.2, FileCount: 38200},
-		{Path: "/usr", SizeBytes: 14 * 1024 * 1024 * 1024, HumanSize: "14.00 GB", Percent: 2.7, FileCount: 89400},
-		{Path: "/var/log", SizeBytes: 4 * 1024 * 1024 * 1024, HumanSize: "4.00 GB", Percent: 0.8, FileCount: 5410},
+	disks := []DiskStats{
+		{
+			Path:        "/",
+			Device:      "/dev/nvme0n1p2",
+			FSType:      "ext4",
+			Total:       256 * 1024 * 1024 * 1024,
+			Used:        118 * 1024 * 1024 * 1024,
+			Free:        138 * 1024 * 1024 * 1024,
+			UsedPercent: 46.1,
+			HumanTotal:  "256.00 GB",
+			HumanUsed:   "118.00 GB",
+			HumanFree:   "138.00 GB",
+			TopDirs: []DirUsage{
+				{Path: "/var/lib/docker", SizeBytes: 64 * 1024 * 1024 * 1024, HumanSize: "64.00 GB", Percent: 25.0, FileCount: 64230},
+				{Path: "/var/log/caddy", SizeBytes: 24 * 1024 * 1024 * 1024, HumanSize: "24.00 GB", Percent: 9.4, FileCount: 1420},
+				{Path: "/usr", SizeBytes: 14 * 1024 * 1024 * 1024, HumanSize: "14.00 GB", Percent: 5.5, FileCount: 89400},
+			},
+		},
+		{
+			Path:        "/mnt/storage",
+			Device:      "/dev/sda1",
+			FSType:      "ext4",
+			Total:       4 * 1024 * 1024 * 1024 * 1024,
+			Used:        2850 * 1024 * 1024 * 1024,
+			Free:        1246 * 1024 * 1024 * 1024,
+			UsedPercent: 69.6,
+			HumanTotal:  "4.00 TB",
+			HumanUsed:   "2.78 TB",
+			HumanFree:   "1.22 TB",
+			TopDirs: []DirUsage{
+				{Path: "/mnt/storage/photos", SizeBytes: 1200 * 1024 * 1024 * 1024, HumanSize: "1.17 TB", Percent: 29.3, FileCount: 184200},
+				{Path: "/mnt/storage/syncthing/projects", SizeBytes: 980 * 1024 * 1024 * 1024, HumanSize: "980.00 GB", Percent: 23.9, FileCount: 41200},
+				{Path: "/mnt/storage/media", SizeBytes: 620 * 1024 * 1024 * 1024, HumanSize: "620.00 GB", Percent: 15.1, FileCount: 3100},
+			},
+		},
 	}
 
 	return SystemMetrics{
@@ -558,17 +772,7 @@ func (c *SystemCollector) collectDemo(now time.Time, hostname string) SystemMetr
 			HumanUsed:   FormatBytes(usedMem),
 			HumanFree:   FormatBytes(totalMem - usedMem),
 		},
-		Disk: DiskStats{
-			Path:        "/",
-			Total:       totalDisk,
-			Used:        usedDisk,
-			Free:        totalDisk - usedDisk,
-			UsedPercent: 46.5,
-			HumanTotal:  FormatBytes(totalDisk),
-			HumanUsed:   FormatBytes(usedDisk),
-			HumanFree:   FormatBytes(totalDisk - usedDisk),
-			TopDirs:     topDirs,
-		},
+		Disks:    disks,
 		Uptime:   "18d 6h 32m",
 		HostName: hostname + " (demo)",
 	}

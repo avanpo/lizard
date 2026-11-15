@@ -46,27 +46,27 @@
 
   // Alerts & Chart elements
   const chartAlert = document.getElementById('chartAlert');
-  const diskAlert = document.getElementById('diskAlert');
   const dockerAlert = document.getElementById('dockerAlert');
   const borgAlert = document.getElementById('borgAlert');
 
   const chartCpuCurrent = document.getElementById('chartCpuCurrent');
   const chartMemCurrent = document.getElementById('chartMemCurrent');
-  const chartDiskCurrent = document.getElementById('chartDiskCurrent');
   const cpuChartSvg = document.getElementById('cpuChart');
   const memChartSvg = document.getElementById('memChart');
-  const diskChartSvg = document.getElementById('diskChart');
   const cpuTooltip = document.getElementById('cpuTooltip');
   const memTooltip = document.getElementById('memTooltip');
-  const diskTooltip = document.getElementById('diskTooltip');
+  const diskChartsRow = document.getElementById('diskChartsRow');
 
   // Table elements
-  const topDirsBody = document.getElementById('topDirsBody');
+  const diskTablesContainer = document.getElementById('diskTablesContainer');
   const diskSummaryDesc = document.getElementById('diskSummaryDesc');
   const containersBody = document.getElementById('containersBody');
   const containerSearch = document.getElementById('containerSearch');
   const borgBody = document.getElementById('borgBody');
   const borgSubtitle = document.getElementById('borgSubtitle');
+
+  let renderedDiskPathsKey = '';
+  let lastDiskTablesJson = '';
 
   const footerUptime = document.getElementById('footerUptime');
   const footerTime = document.getElementById('footerTime');
@@ -134,8 +134,8 @@
     // 2. Historical Charts & Alerts
     renderCharts(history, sys);
 
-    // 3. Top Directories Table & Alerts
-    renderTopDirs(sys.disk);
+    // 3. Per-Disk Notable Directories Tables
+    renderDiskTables(sys.disks || []);
 
     // 4. Docker Containers Table & Alerts
     renderContainersTable(containers, containerSearch.value, data.docker_error);
@@ -145,7 +145,9 @@
   }
 
   function updateHealthPills(sys, dockerErr, borg) {
-    const hasSysErr = sys.cpu_error || (sys.memory && sys.memory.error) || (sys.disk && sys.disk.error);
+    const disks = sys.disks || [];
+    const hasDiskErr = disks.some(d => d.error);
+    const hasSysErr = sys.cpu_error || (sys.memory && sys.memory.error) || hasDiskErr;
     if (hasSysErr) {
       sysHealthPill.className = 'status-indicator-pill status-warn';
       sysHealthPill.textContent = 'System: Access Warning';
@@ -214,23 +216,39 @@
       memSub.textContent = `${mem.human_used || '0 B'} / ${mem.human_total || '0 B'}`;
     }
 
-    // Disk
-    const disk = sys.disk || {};
-    if (disk.error) {
+    // Disks KPI summary
+    const disks = sys.disks || [];
+    const firstErr = disks.find(d => d.error);
+    if (disks.length === 0) {
+      diskCard.classList.add('card-error');
+      diskBadge.className = 'stat-badge badge-err';
+      diskBadge.textContent = 'None';
+      diskValue.innerHTML = `<span style="font-size: 18px; color: #f87171;">No Disks</span>`;
+      diskSub.textContent = 'No mounted disks detected';
+      diskProgressBar.style.width = '0%';
+    } else if (firstErr && disks.every(d => d.error)) {
       diskCard.classList.add('card-error');
       diskBadge.className = 'stat-badge badge-err';
       diskBadge.textContent = 'Error';
       diskValue.innerHTML = `<span style="font-size: 18px; color: #f87171;">Disk Error</span>`;
-      diskSub.textContent = disk.error;
+      diskSub.textContent = firstErr.error;
       diskProgressBar.style.width = '0%';
     } else {
       diskCard.classList.remove('card-error');
+      // Show highest-usage disk in the summary card, with count of all disks
+      const validDisks = disks.filter(d => !d.error);
+      let topDisk = validDisks[0];
+      validDisks.forEach(d => {
+        if ((d.used_percent || 0) > (topDisk.used_percent || 0)) topDisk = d;
+      });
+      const diskPct = topDisk.used_percent || 0;
       diskBadge.className = 'stat-badge';
-      const diskPct = disk.used_percent || 0;
-      diskBadge.textContent = `${diskPct.toFixed(1)}%`;
+      diskBadge.textContent = `${disks.length} ${disks.length === 1 ? 'disk' : 'disks'}`;
       diskValue.innerHTML = `${diskPct.toFixed(1)}<span class="unit">%</span>`;
       diskProgressBar.style.width = `${Math.min(100, Math.max(0, diskPct))}%`;
-      diskSub.textContent = `${disk.human_used || '0 B'} used of ${disk.human_total || '0 B'}`;
+      diskSub.textContent = disks.length === 1
+        ? `${topDisk.path}: ${topDisk.human_used} / ${topDisk.human_total}`
+        : `Peak ${topDisk.path} (${topDisk.human_used} / ${topDisk.human_total})`;
     }
 
     // Containers count
@@ -293,14 +311,63 @@
     const latest = history[history.length - 1];
     chartCpuCurrent.textContent = `${latest.cpu_percent.toFixed(1)}%`;
     chartMemCurrent.textContent = `${latest.mem_percent.toFixed(1)}%`;
-    chartDiskCurrent.textContent = `${latest.disk_percent.toFixed(1)}%`;
 
-    drawSvgChart(cpuChartSvg, cpuTooltip, history, p => p.cpu_percent, '#f59e0b', 'rgba(245, 158, 11, 0.25)', '%');
-    drawSvgChart(memChartSvg, memTooltip, history, p => p.mem_percent, '#38bdf8', 'rgba(56, 189, 248, 0.25)', '%');
-    drawSvgChart(diskChartSvg, diskTooltip, history, p => p.disk_percent, '#a855f7', 'rgba(168, 85, 247, 0.25)', '%');
+    drawSvgChart(cpuChartSvg, cpuTooltip, history, p => p.cpu_percent, '#f59e0b', '%', 'cpu');
+    drawSvgChart(memChartSvg, memTooltip, history, p => p.mem_percent, '#38bdf8', '%', 'mem');
+
+    // Per-Disk Historical Charts
+    const disks = sys.disks || [];
+    const diskPathsKey = disks.map(d => d.path).join('|');
+    if (diskPathsKey !== renderedDiskPathsKey) {
+      renderedDiskPathsKey = diskPathsKey;
+      let cardsHtml = '';
+      disks.forEach((d, idx) => {
+        const sub = d.fstype ? ` (${escapeHtml(d.fstype)})` : '';
+        cardsHtml += `
+          <div class="card chart-card">
+            <div class="chart-card-header">
+              <h3>Disk: <span class="code-pill">${escapeHtml(d.path)}</span>${sub}</h3>
+              <span class="current-metric-pill disk-pill" id="chartDiskCurrent-${idx}">--%</span>
+            </div>
+            <div class="chart-wrapper">
+              <svg id="diskChart-${idx}" class="svg-chart" viewBox="0 0 600 200" preserveAspectRatio="none"></svg>
+              <div id="diskTooltip-${idx}" class="chart-tooltip"></div>
+            </div>
+          </div>
+        `;
+      });
+      diskChartsRow.innerHTML = cardsHtml;
+    }
+
+    const diskColors = ['#a855f7', '#c084fc', '#e879f9', '#818cf8', '#2dd4bf', '#34d399'];
+    disks.forEach((d, idx) => {
+      const pill = document.getElementById(`chartDiskCurrent-${idx}`);
+      const svg = document.getElementById(`diskChart-${idx}`);
+      const tooltip = document.getElementById(`diskTooltip-${idx}`);
+      if (!svg || !tooltip || !pill) return;
+
+      const currentVal = d.error ? null : d.used_percent;
+      pill.textContent = currentVal !== null ? `${currentVal.toFixed(1)}%` : 'Err';
+
+      const color = diskColors[idx % diskColors.length];
+      drawSvgChart(
+        svg,
+        tooltip,
+        history,
+        p => {
+          if (p.disks && typeof p.disks[d.path] === 'number') {
+            return p.disks[d.path];
+          }
+          return idx === 0 ? (p.disk_percent || 0) : 0;
+        },
+        color,
+        '%',
+        `disk-${idx}`
+      );
+    });
   }
 
-  function drawSvgChart(svg, tooltip, data, valFn, strokeColor, fillColor, unit) {
+  function drawSvgChart(svg, tooltip, data, valFn, strokeColor, unit, gradKey) {
     const width = 600;
     const height = 200;
     const padTop = 20;
@@ -342,7 +409,7 @@
         lineD += ` L ${points[i].x.toFixed(1)} ${points[i].y.toFixed(1)}`;
       }
 
-      const gradId = `grad-${strokeColor.replace('#', '')}`;
+      const gradId = `grad-${gradKey}`;
       svgContent += `
         <defs>
           <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
@@ -389,62 +456,105 @@
     };
   }
 
-  // Top Directories & Storage
-  function renderTopDirs(disk) {
-    if (!disk) return;
+  // Per-Disk Notable Directories & Storage
+  function renderDiskTables(disks) {
+    const serialized = JSON.stringify(disks);
+    if (serialized === lastDiskTablesJson) {
+      return;
+    }
+    lastDiskTablesJson = serialized;
 
-    if (disk.error) {
-      diskSummaryDesc.textContent = `Disk error encountered`;
-      diskAlert.style.display = 'block';
-      diskAlert.className = 'alert-box alert-danger';
-      diskAlert.innerHTML = `<strong>Disk Access Error:</strong> ${escapeHtml(disk.error)}. Check directory mount path in <code>LIZARD_DISK_DIRS</code> and <code>LIZARD_HOST_ROOT</code>.`;
-      topDirsBody.innerHTML = `<tr><td colspan="4" class="empty-state" style="color: #f87171;">Disk inaccessible: ${escapeHtml(disk.error)}</td></tr>`;
+    if (!disks || disks.length === 0) {
+      diskSummaryDesc.textContent = 'No disks detected';
+      diskTablesContainer.innerHTML = `<div class="card table-card"><div class="empty-state">No mounted disks found</div></div>`;
       return;
     }
 
-    diskSummaryDesc.textContent = `Mount ${disk.path || '/'}: ${disk.human_used || '0 B'} used of ${disk.human_total || '0 B'} (${(disk.used_percent || 0).toFixed(1)}% full)`;
+    diskSummaryDesc.textContent = `${disks.length} mounted ${disks.length === 1 ? 'disk' : 'disks'} — automatically surfacing largest rolled-up folders and deep hotspots`;
 
-    if (disk.top_dirs_warning) {
-      diskAlert.style.display = 'block';
-      diskAlert.className = 'alert-box alert-warning';
-      const notes = (disk.permission_notes && disk.permission_notes.length > 0)
-        ? ` (${disk.permission_notes.join(', ')})`
-        : '';
-      diskAlert.innerHTML = `
-        <div class="alert-header">⚠️ Directory Permission Warning</div>
-        <div>${escapeHtml(disk.top_dirs_warning)}${escapeHtml(notes)}. To scan all restricted host directories (like <code>/var/lib/docker</code> or <code>/root</code>), run the container with <code>user: "0:0"</code>.</div>
-      `;
-    } else {
-      diskAlert.style.display = 'none';
-    }
+    let html = '';
+    disks.forEach(disk => {
+      const metaBadges = [];
+      if (disk.fstype) metaBadges.push(`<span class="badge badge-neutral">${escapeHtml(disk.fstype)}</span>`);
+      if (disk.device) metaBadges.push(`<span class="dim-sub" style="display:inline;">${escapeHtml(disk.device)}</span>`);
 
-    const topDirs = disk.top_dirs || [];
-    if (topDirs.length === 0) {
-      topDirsBody.innerHTML = `<tr><td colspan="4" class="empty-state">No directory statistics available or scan in progress...</td></tr>`;
-      return;
-    }
+      let alertHtml = '';
+      if (disk.error) {
+        alertHtml = `<div class="alert-box alert-danger" style="margin: 12px 16px 0;"><strong>Disk Access Error:</strong> ${escapeHtml(disk.error)}</div>`;
+      } else if (disk.top_dirs_warning) {
+        const notes = (disk.permission_notes && disk.permission_notes.length > 0)
+          ? ` (${disk.permission_notes.join(', ')})`
+          : '';
+        alertHtml = `
+          <div class="alert-box alert-warning" style="margin: 12px 16px 0;">
+            <div class="alert-header">⚠️ Directory Permission Warning</div>
+            <div>${escapeHtml(disk.top_dirs_warning)}${escapeHtml(notes)}. Run container with <code>user: "0:0"</code> to scan restricted folders.</div>
+          </div>
+        `;
+      }
 
-    let rowsHtml = '';
-    topDirs.forEach(dir => {
-      const pct = (dir.percent || 0).toFixed(1);
-      const fileCountStr = dir.file_count ? dir.file_count.toLocaleString() : 'N/A';
-      rowsHtml += `
-        <tr>
-          <td><span class="code-pill">${escapeHtml(dir.path)}</span></td>
-          <td><strong>${escapeHtml(dir.human_size)}</strong></td>
-          <td>
-            <div class="table-bar-container">
-              <div class="table-mini-bar">
-                <div class="table-mini-fill" style="width: ${Math.min(100, pct)}%; background: #a855f7;"></div>
-              </div>
-              <span class="table-bar-pct">${pct}%</span>
+      let rowsHtml = '';
+      const topDirs = disk.top_dirs || [];
+      if (disk.error) {
+        rowsHtml = `<tr><td colspan="4" class="empty-state" style="color: #f87171;">Disk inaccessible: ${escapeHtml(disk.error)}</td></tr>`;
+      } else if (topDirs.length === 0) {
+        rowsHtml = `<tr><td colspan="4" class="empty-state">No notable directories found or scan in progress...</td></tr>`;
+      } else {
+        topDirs.forEach(dir => {
+          const pct = (dir.percent || 0).toFixed(1);
+          const fileCountStr = dir.file_count ? dir.file_count.toLocaleString() : 'N/A';
+          rowsHtml += `
+            <tr>
+              <td><span class="code-pill">${escapeHtml(dir.path)}</span></td>
+              <td><strong>${escapeHtml(dir.human_size)}</strong></td>
+              <td>
+                <div class="table-bar-container">
+                  <div class="table-mini-bar">
+                    <div class="table-mini-fill" style="width: ${Math.min(100, pct)}%; background: #a855f7;"></div>
+                  </div>
+                  <span class="table-bar-pct">${pct}%</span>
+                </div>
+              </td>
+              <td><span class="dim-sub">${fileCountStr} files</span></td>
+            </tr>
+          `;
+        });
+      }
+
+      const statsText = disk.error
+        ? 'Unavailable'
+        : `${escapeHtml(disk.human_used)} used of ${escapeHtml(disk.human_total)} (${escapeHtml(disk.human_free)} free • ${(disk.used_percent || 0).toFixed(1)}%)`;
+
+      html += `
+        <div class="card table-card">
+          <div class="disk-table-header">
+            <div class="disk-table-title">
+              <span class="code-pill">${escapeHtml(disk.path)}</span>
+              ${metaBadges.join(' ')}
             </div>
-          </td>
-          <td><span class="dim-sub">${fileCountStr} files</span></td>
-        </tr>
+            <div class="disk-table-stats">${statsText}</div>
+          </div>
+          ${alertHtml}
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Notable Directory</th>
+                  <th>Size</th>
+                  <th style="width: 35%;">Share of Disk</th>
+                  <th>Files</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rowsHtml}
+              </tbody>
+            </table>
+          </div>
+        </div>
       `;
     });
-    topDirsBody.innerHTML = rowsHtml;
+
+    diskTablesContainer.innerHTML = html;
   }
 
   // Docker Containers Table
