@@ -26,8 +26,8 @@ ENV LIZARD_PORT=8080 \
     LIZARD_DOCKER_SOCKET=/var/run/docker.sock \
     LIZARD_HOST_ROOT=/host
 
-# Healthcheck
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+# Healthcheck (short interval/start-period so container transitions to healthy quickly)
+HEALTHCHECK --interval=5s --timeout=2s --start-period=1s --retries=3 \
   CMD wget -qO- http://127.0.0.1:${LIZARD_PORT:-8080}/healthz || exit 1
 
 EXPOSE 8080

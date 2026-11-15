@@ -58,13 +58,16 @@ var ignoredFSTypes = map[string]bool{
 	"ramfs": true, "selinuxfs": true, "fuse.portal": true,
 }
 
-// discoverMounts reads /proc/mounts to find unique physical/network disks.
+// discoverMounts reads the host mount table to find unique physical/network disks.
 func discoverMounts(hostRoot string) []discoveredMount {
 	mountsPath := "/proc/mounts"
 	if hostRoot != "" && hostRoot != "/" {
-		candidate := filepath.Join(hostRoot, "proc", "mounts")
-		if _, err := os.Stat(candidate); err == nil {
-			mountsPath = candidate
+		hostProcMounts := filepath.Join(hostRoot, "proc", "mounts")
+		if _, err := os.Stat(hostProcMounts); err == nil {
+			mountsPath = hostProcMounts
+		} else if _, err := os.Stat("/proc/1/mounts"); err == nil {
+			// With pid: "host", PID 1 is the host's init/systemd, so /proc/1/mounts has the host mount table
+			mountsPath = "/proc/1/mounts"
 		}
 	}
 
@@ -108,6 +111,11 @@ func discoverMounts(hostRoot string) []discoveredMount {
 			} else {
 				scanPath = filepath.Join(hostRoot, strings.TrimPrefix(mnt, "/"))
 			}
+		}
+
+		fi, err := os.Stat(scanPath)
+		if err != nil || !fi.IsDir() {
+			continue
 		}
 
 		devID, ok := getDevID(scanPath)
