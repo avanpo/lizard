@@ -117,11 +117,11 @@ func discoverMounts(hostRoot string) []discoveredMount {
 		if ignoredFSTypes[fsType] {
 			continue
 		}
-		// Skip container/system internal mount paths
+		// Skip container/system internal mount paths and OS boot partitions
 		if strings.HasPrefix(mnt, "/proc") || strings.HasPrefix(mnt, "/sys") ||
 			strings.HasPrefix(mnt, "/dev") || strings.HasPrefix(mnt, "/run") ||
 			strings.Contains(mnt, "/docker/overlay2") || strings.Contains(mnt, "/docker/containers") ||
-			strings.HasPrefix(mnt, "/snap/") || strings.HasPrefix(mnt, "/boot/efi") {
+			strings.HasPrefix(mnt, "/snap/") || mnt == "/boot" || strings.HasPrefix(mnt, "/boot/") {
 			continue
 		}
 
